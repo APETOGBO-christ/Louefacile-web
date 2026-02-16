@@ -1,0 +1,11 @@
+﻿/* Local stylesheet kept intentionally light. Tailwind utility classes handle most styling. */
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
