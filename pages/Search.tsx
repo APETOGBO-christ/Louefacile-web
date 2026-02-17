@@ -4,11 +4,13 @@ import {
   ChevronDown,
   Map as MapIcon,
   MapPin,
+  LocateFixed,
   List,
   X,
   Home,
   Banknote,
   BedDouble,
+  Loader2,
   Search as SearchIcon,
   Lock,
 } from 'lucide-react';
@@ -24,6 +26,8 @@ interface FilterState {
   minPrice: number;
   maxPrice: number;
   bedrooms: number;
+  nearbyOnly: boolean;
+  nearbyRadiusKm: number;
 }
 
 interface SearchProps {
@@ -35,6 +39,46 @@ type DesktopView = 'list' | 'map';
 const DEFAULT_MIN_PRICE = 10000;
 const DEFAULT_MAX_PRICE = 75000;
 const ABSOLUTE_MAX_PRICE = 300000;
+const DEFAULT_NEARBY_RADIUS_KM = 5;
+const MIN_NEARBY_RADIUS_KM = 1;
+const MAX_NEARBY_RADIUS_KM = 25;
+
+interface Coordinates {
+  lat: number;
+  lng: number;
+}
+
+const toRadians = (value: number): number => (value * Math.PI) / 180;
+
+const calculateDistanceKm = (origin: Coordinates, target: Coordinates): number => {
+  const earthRadiusKm = 6371;
+  const dLat = toRadians(target.lat - origin.lat);
+  const dLng = toRadians(target.lng - origin.lng);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(origin.lat)) *
+      Math.cos(toRadians(target.lat)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+};
+
+const getGeolocationErrorMessage = (error: GeolocationPositionError): string => {
+  if (error.code === 1) {
+    return 'Vous avez refuse la geolocalisation.';
+  }
+
+  if (error.code === 2) {
+    return 'Position indisponible pour le moment.';
+  }
+
+  if (error.code === 3) {
+    return "Le delai de geolocalisation est depasse.";
+  }
+
+  return "Impossible d'obtenir votre position.";
+};
 
 const Search: React.FC<SearchProps> = ({ user }) => {
   const navigate = useNavigate();
@@ -44,6 +88,9 @@ const Search: React.FC<SearchProps> = ({ user }) => {
   const [desktopView, setDesktopView] = useState<DesktopView>('list');
   const [listings, setListings] = useState<Listing[]>([]);
   const [isLoadingListings, setIsLoadingListings] = useState(true);
+  const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
+  const [isLocatingUser, setIsLocatingUser] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   const [filters, setFilters] = useState<FilterState>({
     type: 'all',
@@ -51,6 +98,8 @@ const Search: React.FC<SearchProps> = ({ user }) => {
     minPrice: DEFAULT_MIN_PRICE,
     maxPrice: DEFAULT_MAX_PRICE,
     bedrooms: 0,
+    nearbyOnly: false,
+    nearbyRadiusKm: DEFAULT_NEARBY_RADIUS_KM,
   });
   const [localityInput, setLocalityInput] = useState('');
 
@@ -116,8 +165,7 @@ const Search: React.FC<SearchProps> = ({ user }) => {
   const filteredListings = useMemo(() => {
     const normalizedQuery = currentQuery.toLowerCase();
     const normalizedLocality = filters.locality.trim().toLowerCase();
-
-    return listings.filter((listing) => {
+    const nextListings = listings.filter((listing) => {
       if (filters.type !== 'all' && listing.type !== filters.type) {
         return false;
       }
@@ -134,6 +182,17 @@ const Search: React.FC<SearchProps> = ({ user }) => {
         return false;
       }
 
+      if (filters.nearbyOnly) {
+        if (!userLocation) {
+          return false;
+        }
+
+        const distanceKm = calculateDistanceKm(userLocation, listing.coordinates);
+        if (distanceKm > filters.nearbyRadiusKm) {
+          return false;
+        }
+      }
+
       if (!normalizedQuery) {
         return true;
       }
@@ -141,7 +200,30 @@ const Search: React.FC<SearchProps> = ({ user }) => {
       const haystack = `${listing.title} ${listing.location} ${listing.description}`.toLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [listings, filters, currentQuery]);
+
+    if (filters.nearbyOnly && userLocation) {
+      nextListings.sort(
+        (first, second) =>
+          calculateDistanceKm(userLocation, first.coordinates) -
+          calculateDistanceKm(userLocation, second.coordinates),
+      );
+    }
+
+    return nextListings;
+  }, [listings, filters, currentQuery, userLocation]);
+
+  const distanceByListingId = useMemo(() => {
+    const distances = new Map<string, number>();
+    if (!userLocation) {
+      return distances;
+    }
+
+    filteredListings.forEach((listing) => {
+      distances.set(listing.id, calculateDistanceKm(userLocation, listing.coordinates));
+    });
+
+    return distances;
+  }, [filteredListings, userLocation]);
 
   const passExpiryMs = user?.passExpiry ? Date.parse(user.passExpiry) : null;
   const isPassActive = Boolean(user?.hasActivePass && (!passExpiryMs || passExpiryMs > Date.now()));
@@ -156,6 +238,7 @@ const Search: React.FC<SearchProps> = ({ user }) => {
     (filters.locality.trim() ? 1 : 0) +
     (isPriceActive ? 1 : 0) +
     (filters.bedrooms > 0 ? 1 : 0) +
+    (filters.nearbyOnly ? 1 : 0) +
     (currentQuery ? 1 : 0);
 
   const toggleDropdown = (name: string) => {
@@ -187,6 +270,8 @@ const Search: React.FC<SearchProps> = ({ user }) => {
       minPrice: DEFAULT_MIN_PRICE,
       maxPrice: DEFAULT_MAX_PRICE,
       bedrooms: 0,
+      nearbyOnly: false,
+      nearbyRadiusKm: DEFAULT_NEARBY_RADIUS_KM,
     });
 
     const nextParams = new URLSearchParams(searchParams);
@@ -195,7 +280,39 @@ const Search: React.FC<SearchProps> = ({ user }) => {
 
     setQueryInput('');
     setLocalityInput('');
+    setLocationError(null);
     setActiveDropdown(null);
+  };
+
+  const requestUserLocation = () => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setLocationError("La geolocalisation n'est pas disponible sur cet appareil.");
+      return;
+    }
+
+    setIsLocatingUser(true);
+    setLocationError(null);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        });
+        setFilters((prev) => ({ ...prev, nearbyOnly: true }));
+        setIsLocatingUser(false);
+      },
+      (error) => {
+        setLocationError(getGeolocationErrorMessage(error));
+        setFilters((prev) => ({ ...prev, nearbyOnly: false }));
+        setIsLocatingUser(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 120000,
+      },
+    );
   };
 
   const handleSearchSubmit = (event: React.FormEvent) => {
@@ -225,6 +342,18 @@ const Search: React.FC<SearchProps> = ({ user }) => {
     }
   };
 
+  const hasDetectedLocation = Boolean(userLocation);
+  const isNearbyFilterActive = filters.nearbyOnly && hasDetectedLocation;
+  const nearbyFilterLabel = isNearbyFilterActive
+    ? `Dans ${filters.nearbyRadiusKm} km`
+    : hasDetectedLocation
+      ? `Rayon ${filters.nearbyRadiusKm} km`
+      : 'Autour de moi';
+  const mapCenter =
+    isNearbyFilterActive && userLocation
+      ? ([userLocation.lat, userLocation.lng] as [number, number])
+      : undefined;
+
   return (
     <div className="min-h-screen bg-gray-50 pt-20">
       <div className="relative z-20 bg-white/90 backdrop-blur-xl border-b border-gray-200 shadow-sm transition-all duration-300">
@@ -249,9 +378,21 @@ const Search: React.FC<SearchProps> = ({ user }) => {
           </form>
 
           <div className="flex items-center justify-between gap-3 mb-3">
-            <span className="text-sm font-semibold text-gray-600">
-              <strong className="text-gray-900">{filteredListings.length}</strong> resultats
-            </span>
+            <div className="space-y-1">
+              <span className="text-sm font-semibold text-gray-600 block">
+                <strong className="text-gray-900">{filteredListings.length}</strong> resultats
+              </span>
+              {isNearbyFilterActive && (
+                <span className="inline-flex items-center rounded-full bg-primary-50 px-2.5 py-1 text-[11px] font-bold text-primary-700">
+                  Tri par proximite active ({filters.nearbyRadiusKm} km)
+                </span>
+              )}
+              {!isNearbyFilterActive && locationError && (
+                <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-bold text-red-700">
+                  {locationError}
+                </span>
+              )}
+            </div>
 
             <div className="flex items-center gap-3">
               <button
@@ -306,7 +447,7 @@ const Search: React.FC<SearchProps> = ({ user }) => {
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 relative" ref={dropdownRef}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 relative" ref={dropdownRef}>
               <div className="relative">
                 <FilterPill
                   title="Localite"
@@ -484,6 +625,93 @@ const Search: React.FC<SearchProps> = ({ user }) => {
                   </div>
                 )}
               </div>
+
+              <div className="relative">
+                <FilterPill
+                  title="Proximite"
+                  label={nearbyFilterLabel}
+                  active={isNearbyFilterActive}
+                  open={activeDropdown === 'nearby'}
+                  icon={<LocateFixed size={16} />}
+                  onClick={() => toggleDropdown('nearby')}
+                />
+                {activeDropdown === 'nearby' && (
+                  <div className="absolute top-full left-0 mt-2 w-full min-w-[280px] bg-white rounded-2xl shadow-xl border border-gray-100 p-5 animate-fade-in-up z-50">
+                    <h3 className="font-bold text-gray-900 mb-1">Autour de moi</h3>
+                    <p className="text-xs text-gray-500 mb-4">
+                      Trouvez les logements proches de votre position actuelle.
+                    </p>
+
+                    <button
+                      onClick={requestUserLocation}
+                      disabled={isLocatingUser}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-sm font-bold text-gray-700 hover:border-gray-400 disabled:opacity-70 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {isLocatingUser ? (
+                        <>
+                          <Loader2 size={15} className="animate-spin" />
+                          Localisation...
+                        </>
+                      ) : (
+                        <>
+                          <LocateFixed size={15} />
+                          {userLocation ? 'Actualiser ma position' : 'Utiliser ma position'}
+                        </>
+                      )}
+                    </button>
+
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between text-xs font-bold text-gray-500 mb-2">
+                        <span>Rayon de recherche</span>
+                        <span>{filters.nearbyRadiusKm} km</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={MIN_NEARBY_RADIUS_KM}
+                        max={MAX_NEARBY_RADIUS_KM}
+                        step={1}
+                        value={filters.nearbyRadiusKm}
+                        onChange={(event) =>
+                          setFilters((prev) => ({
+                            ...prev,
+                            nearbyRadiusKm: Number(event.target.value),
+                          }))
+                        }
+                        disabled={!userLocation}
+                        className="w-full h-2 bg-gray-100 rounded-lg appearance-none cursor-pointer accent-primary-600 disabled:cursor-not-allowed"
+                      />
+                      <div className="flex justify-between text-[10px] font-bold text-gray-400 mt-1">
+                        <span>{MIN_NEARBY_RADIUS_KM} km</span>
+                        <span>{MAX_NEARBY_RADIUS_KM} km</span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() =>
+                        setFilters((prev) => ({
+                          ...prev,
+                          nearbyOnly: !prev.nearbyOnly,
+                        }))
+                      }
+                      disabled={!userLocation}
+                      className={`mt-4 w-full rounded-xl px-4 py-2.5 text-sm font-bold transition-colors ${
+                        isNearbyFilterActive
+                          ? 'bg-primary-600 text-white hover:bg-primary-700'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      } ${!userLocation ? 'opacity-60 cursor-not-allowed' : ''}`}
+                    >
+                      {isNearbyFilterActive ? 'Desactiver le filtre de proximite' : 'Afficher les logements proches'}
+                    </button>
+
+                    {locationError && <p className="mt-3 text-xs font-semibold text-red-600">{locationError}</p>}
+                    {userLocation && (
+                      <p className="mt-3 text-xs text-gray-500">
+                        Position detectee: {userLocation.lat.toFixed(3)}, {userLocation.lng.toFixed(3)}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -506,7 +734,11 @@ const Search: React.FC<SearchProps> = ({ user }) => {
             ) : filteredListings.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                 {filteredListings.map((listing) => (
-                  <ListingCard key={listing.id} listing={listing} />
+                  <ListingCard
+                    key={listing.id}
+                    listing={listing}
+                    distanceKm={isNearbyFilterActive ? distanceByListingId.get(listing.id) : undefined}
+                  />
                 ))}
               </div>
             ) : (
@@ -535,7 +767,11 @@ const Search: React.FC<SearchProps> = ({ user }) => {
           >
             <div className="w-full h-full bg-gray-100 relative">
               <div className={isPassActive ? 'h-full w-full' : 'h-full w-full blur-[3px] saturate-0'}>
-                <ListingMap listings={mapListings} interactive={isPassActive} />
+                <ListingMap
+                  listings={mapListings}
+                  interactive={isPassActive}
+                  center={mapCenter}
+                />
               </div>
 
               {isPassActive ? (

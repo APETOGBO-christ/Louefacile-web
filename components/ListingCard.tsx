@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 
 interface ListingCardProps {
   listing: Listing;
+  distanceKm?: number;
 }
 
 const STORAGE_KEY = 'louefacile_likes';
@@ -23,7 +24,16 @@ const readLikedListings = (): string[] => {
   }
 };
 
-const ListingCard: React.FC<ListingCardProps> = ({ listing }) => {
+const formatDistance = (distanceKm: number): string => {
+  if (distanceKm < 1) {
+    return `${Math.round(distanceKm * 1000)} m`;
+  }
+
+  const precision = distanceKm < 10 ? 1 : 0;
+  return `${distanceKm.toFixed(precision)} km`;
+};
+
+const ListingCard: React.FC<ListingCardProps> = ({ listing, distanceKm }) => {
   const [isLiked, setIsLiked] = useState(false);
 
   useEffect(() => {
@@ -95,9 +105,16 @@ const ListingCard: React.FC<ListingCardProps> = ({ listing }) => {
             <ArrowUpRight size={20} className="text-gray-300 group-hover:text-primary-600 transition-colors opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 duration-300" />
           </div>
 
-          <div className="flex items-center text-gray-500 text-sm mb-6 bg-gray-50 w-fit px-3 py-1 rounded-full">
-            <MapPin size={14} className="mr-1.5 text-secondary-500" />
-            <span className="truncate max-w-[200px]">{listing.location}</span>
+          <div className="mb-6 flex flex-wrap items-center gap-2">
+            <div className="flex items-center text-gray-500 text-sm bg-gray-50 w-fit px-3 py-1 rounded-full">
+              <MapPin size={14} className="mr-1.5 text-secondary-500" />
+              <span className="truncate max-w-[200px]">{listing.location}</span>
+            </div>
+            {typeof distanceKm === 'number' && (
+              <span className="inline-flex items-center rounded-full bg-primary-50 px-3 py-1 text-xs font-bold text-primary-700">
+                {formatDistance(distanceKm)}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center justify-between text-gray-600 text-sm mt-auto pt-4 border-t border-gray-100">
