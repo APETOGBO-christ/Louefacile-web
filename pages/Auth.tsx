@@ -57,10 +57,10 @@ const Auth: React.FC<AuthProps> = ({ user, onAuthSuccess }) => {
   }, [requestedMode]);
 
   useEffect(() => {
-    if (user) {
+    if (user && mode !== 'reset') {
       navigate(redirectPath, { replace: true });
     }
-  }, [user, redirectPath, navigate]);
+  }, [user, mode, redirectPath, navigate]);
 
   const isBusy = pendingAction !== 'idle';
   const oauthMethods = [

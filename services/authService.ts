@@ -1,4 +1,4 @@
-import { AuthChangeEvent, Provider, Session, User as SupabaseUser } from '@supabase/supabase-js';
+import { AuthChangeEvent, EmailOtpType, Provider, Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { User } from '../types';
 import { supabase } from './supabaseClient';
 
@@ -27,6 +27,18 @@ export interface AuthResult {
 export type OAuthProvider = Extract<Provider, 'google' | 'facebook' | 'apple'>;
 
 const MISSING_CONFIG_MESSAGE = "Supabase n'est pas configure. Renseignez VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY.";
+const CALLBACK_PARAM_KEYS = [
+  'code',
+  'token_hash',
+  'type',
+  'access_token',
+  'refresh_token',
+  'expires_at',
+  'expires_in',
+  'provider_token',
+  'provider_refresh_token',
+];
+const SUPPORTED_EMAIL_OTP_TYPES: EmailOtpType[] = ['signup', 'invite', 'magiclink', 'recovery', 'email_change', 'email'];
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
@@ -66,6 +78,89 @@ const buildHashRedirect = (hashPath: string): string => {
   const normalized = hashPath.startsWith('/') ? hashPath : `/${hashPath}`;
   return `${base}#${normalized}`;
 };
+
+const mergeParams = (target: URLSearchParams, source: URLSearchParams): void => {
+  source.forEach((value, key) => {
+    if (!target.has(key)) {
+      target.set(key, value);
+    }
+  });
+};
+
+const getCallbackParamsFromUrl = (): URLSearchParams => {
+  const merged = new URLSearchParams();
+  if (typeof window === 'undefined') {
+    return merged;
+  }
+
+  mergeParams(merged, new URLSearchParams(window.location.search));
+
+  const rawHash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+  if (!rawHash) {
+    return merged;
+  }
+
+  const hashFragments = rawHash.split('#').filter(Boolean);
+  hashFragments.forEach((fragment) => {
+    if (fragment.includes('?')) {
+      mergeParams(merged, new URLSearchParams(fragment.split('?')[1] || ''));
+    }
+
+    if (fragment.includes('=')) {
+      const directParams = fragment.includes('?') ? fragment.split('?')[1] || '' : fragment.replace(/^\/+/, '');
+      if (directParams.includes('=')) {
+        mergeParams(merged, new URLSearchParams(directParams));
+      }
+    }
+  });
+
+  return merged;
+};
+
+const cleanHashFragment = (fragment: string): string => {
+  if (!fragment) {
+    return fragment;
+  }
+
+  if (fragment.includes('?')) {
+    const [path, queryString = ''] = fragment.split('?', 2);
+    const params = new URLSearchParams(queryString);
+    CALLBACK_PARAM_KEYS.forEach((key) => params.delete(key));
+    const remainingQuery = params.toString();
+    return remainingQuery ? `${path}?${remainingQuery}` : path;
+  }
+
+  if (!fragment.includes('=')) {
+    return fragment;
+  }
+
+  const params = new URLSearchParams(fragment);
+  CALLBACK_PARAM_KEYS.forEach((key) => params.delete(key));
+  return params.toString();
+};
+
+const clearCallbackParamsFromUrl = (): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  CALLBACK_PARAM_KEYS.forEach((key) => url.searchParams.delete(key));
+
+  const rawHash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+  if (rawHash) {
+    const cleanHash = rawHash
+      .split('#')
+      .map(cleanHashFragment)
+      .filter(Boolean)
+      .join('#');
+    url.hash = cleanHash ? `#${cleanHash}` : '';
+  }
+
+  window.history.replaceState({}, document.title, url.toString());
+};
+
+const isEmailOtpType = (value: string): value is EmailOtpType => SUPPORTED_EMAIL_OTP_TYPES.includes(value as EmailOtpType);
 
 const fetchProfile = async (userId: string): Promise<ProfileRow | null> => {
   if (!supabase) {
@@ -160,6 +255,55 @@ export const getCurrentUser = async (): Promise<User | null> => {
   return ensureProfileAndMapUser(sessionUser);
 };
 
+export const consumeAuthCallbackFromUrl = async (): Promise<{ handled: boolean; error?: string }> => {
+  if (!supabase || typeof window === 'undefined') {
+    return { handled: false };
+  }
+
+  const params = getCallbackParamsFromUrl();
+  const code = params.get('code');
+  const tokenHash = params.get('token_hash');
+  const rawType = params.get('type');
+  const accessToken = params.get('access_token');
+  const refreshToken = params.get('refresh_token');
+
+  if (!code && !(tokenHash && rawType) && !(accessToken && refreshToken)) {
+    return { handled: false };
+  }
+
+  let errorMessage: string | undefined;
+
+  if (code) {
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      errorMessage = error.message;
+    }
+  } else if (tokenHash && rawType) {
+    if (!isEmailOtpType(rawType)) {
+      errorMessage = 'Type de verification email non pris en charge.';
+    } else {
+      const { error } = await supabase.auth.verifyOtp({
+        token_hash: tokenHash,
+        type: rawType,
+      });
+      if (error) {
+        errorMessage = error.message;
+      }
+    }
+  } else if (accessToken && refreshToken) {
+    const { error } = await supabase.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+    if (error) {
+      errorMessage = error.message;
+    }
+  }
+
+  clearCallbackParamsFromUrl();
+  return errorMessage ? { handled: true, error: errorMessage } : { handled: true };
+};
+
 export const registerUser = async ({ name, email, password }: AuthPayload): Promise<AuthResult> => {
   if (!supabase) {
     return { ok: false, error: MISSING_CONFIG_MESSAGE };
@@ -182,7 +326,7 @@ export const registerUser = async ({ name, email, password }: AuthPayload): Prom
     password: cleanPassword,
     options: {
       data: { name: cleanName },
-      emailRedirectTo: buildHashRedirect('/auth?mode=login'),
+      emailRedirectTo: buildHashRedirect(`/auth?mode=login&redirect=${encodeURIComponent('/dashboard')}`),
     },
   });
 
@@ -341,7 +485,7 @@ export const resendEmailVerification = async (email: string): Promise<AuthResult
   const { error } = await supabase.auth.resend({
     type: 'signup',
     email: cleanEmail,
-    options: { emailRedirectTo: buildHashRedirect('/auth?mode=login') },
+    options: { emailRedirectTo: buildHashRedirect(`/auth?mode=login&redirect=${encodeURIComponent('/dashboard')}`) },
   });
 
   if (error) {

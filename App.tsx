@@ -11,7 +11,7 @@ import ReportAbuse from './pages/ReportAbuse';
 import Auth from './pages/Auth';
 import Dashboard from './pages/Dashboard';
 import { User } from './types';
-import { getCurrentUser, logoutUser, subscribeToAuthChanges } from './services/authService';
+import { consumeAuthCallbackFromUrl, getCurrentUser, logoutUser, subscribeToAuthChanges } from './services/authService';
 import { activateSearchPass } from './services/listingService';
 import launcherIcon from './assets/launcher_icon.png';
 
@@ -84,6 +84,7 @@ const App: React.FC = () => {
     let isMounted = true;
 
     const hydrateSession = async () => {
+      await consumeAuthCallbackFromUrl();
       const currentUser = await getCurrentUser();
       if (!isMounted) {
         return;
