@@ -326,7 +326,7 @@ export const registerUser = async ({ name, email, password }: AuthPayload): Prom
     password: cleanPassword,
     options: {
       data: { name: cleanName },
-      emailRedirectTo: buildHashRedirect(`/auth?mode=login&redirect=${encodeURIComponent('/dashboard')}`),
+      emailRedirectTo: buildHashRedirect('/dashboard'),
     },
   });
 
@@ -485,7 +485,7 @@ export const resendEmailVerification = async (email: string): Promise<AuthResult
   const { error } = await supabase.auth.resend({
     type: 'signup',
     email: cleanEmail,
-    options: { emailRedirectTo: buildHashRedirect(`/auth?mode=login&redirect=${encodeURIComponent('/dashboard')}`) },
+    options: { emailRedirectTo: buildHashRedirect('/dashboard') },
   });
 
   if (error) {
